@@ -31,7 +31,8 @@ import           Development.IDE.Spans.Common
 import           Development.IDE.Types.Options
 
 -- GHC API imports
-import           FastString                           (unpackFS)
+-- GHC API imports
+import           FastString                           (unpackFS, lengthFS)
 import           IfaceType
 import           Name
 import           NameEnv
@@ -173,13 +174,17 @@ documentHighlight hf rf pos = pure highlights
     highlights = do
       n <- ns
       ref <- fromMaybe [] (M.lookup (Right n) rf)
-      pure $ makeHighlight ref
-    makeHighlight (sp,dets) =
-      DocumentHighlight (realSrcSpanToRange sp) (Just $ highlightType $ identInfo dets)
+      maybeToList (makeHighlight n ref)
+    makeHighlight n (sp,dets)
+      | isTvNameSpace (nameNameSpace n) && isBadSpan n sp = Nothing
+      | otherwise = Just $ DocumentHighlight (realSrcSpanToRange sp) (Just $ highlightType $ identInfo dets)
     highlightType s =
       if any (isJust . getScopeFromContext) s
         then HkWrite
         else HkRead
+
+    isBadSpan :: Name -> RealSrcSpan -> Bool
+    isBadSpan n sp = srcSpanStartLine sp /= srcSpanEndLine sp || (srcSpanEndCol sp - srcSpanStartCol sp > lengthFS (occNameFS $ nameOccName n))
 
 gotoTypeDefinition
   :: MonadIO m
@@ -271,30 +276,29 @@ atPoint IdeOptions{} (HAR _ (hf :: HieASTs a) _rf _ kind) (DKMap dm km) pos = li
         renderEvidenceTree (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_)}) [x])
           = renderEvidenceTree x
         renderEvidenceTree (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_), ..}) xs)
-          = hang (text "- Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
-                 vcat $ text "depending on:" : map renderEvidenceTree' xs
-        renderEvidenceTree x = renderEvidenceTree' x
+          = hang (text "Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
+                 vcat $ text "constructed using:" : map renderEvidenceTree' xs
+        renderEvidenceTree (T.Node (EvidenceInfo{..}) _)
+          = hang (text "Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
+                 vcat $ printDets evidenceSpan evidenceDetails : map (text . T.unpack) (definedAt evidenceVar)
 
         -- renderEvidenceTree' skips let bound evidence variables and prints the children directly
         renderEvidenceTree' (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_)}) xs)
           = vcat (map renderEvidenceTree' xs)
-        renderEvidenceTree' (T.Node (EvidenceInfo{..}) xs)
-          = hang (text "- Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
-                 vcat $ map (text . T.unpack) (definedAt evidenceVar)
-                     ++ [printDets evidenceSpan evidenceDetails (null xs)]
-                     ++ map renderEvidenceTree' xs
+        renderEvidenceTree' (T.Node (EvidenceInfo{..}) _)
+          = hang (text "- `" O.<> expandType evidenceType O.<> "`") 2 $
+                 vcat $ printDets evidenceSpan evidenceDetails : map (text . T.unpack) (definedAt evidenceVar)
 
-        printDets :: RealSrcSpan -> Maybe (EvVarSource, Scope, Maybe Span) -> Bool -> SDoc
-        printDets _    Nothing True = text ""
-        printDets _    Nothing False = text "constructed using:"
-        printDets ospn (Just (src,_,mspn)) _ = pprSrc
+        printDets :: RealSrcSpan -> Maybe (EvVarSource, Scope, Maybe Span) -> SDoc
+        printDets _    Nothing = text "using an external instance"
+        printDets ospn (Just (src,_,mspn)) = pprSrc
                                       $$ text "at" <+> ppr spn
           where
             -- Use the bind span if we have one, else use the occurence span
             spn = fromMaybe ospn mspn
             pprSrc = case src of
               -- Users don't know what HsWrappers are
-              EvWrapperBind -> "bound by type signature or pattern"
+              EvWrapperBind -> "bound by a context"
               _ -> ppr src
 #endif
 
