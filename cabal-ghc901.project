@@ -53,6 +53,12 @@ source-repository-package
   subdir: dependent-sum-template
 -- https://github.com/obsidiansystems/dependent-sum/pull/59
 
+source-repository-package
+  type:git
+  location: https://github.com/tvh/ekg-wai/
+  tag: ba56333e0959f896a03f15a9f151f4a31d1bfcca
+  -- https://github.com/tvh/ekg-wai/issues/4
+
 write-ghc-environment-files: never
 
 index-state: 2021-10-04T02:41:06Z
@@ -62,6 +68,14 @@ constraints:
     haskell-language-server -brittany -class -stylishhaskell -tactic
 
 allow-newer:
+    -- https://github.com/tibbe/ekg/issues/85
+    ekg:base,
+    ekg-core:base,
+    ekg-core:ghc-prim,
+    ekg-json:base,
+    -- https://github.com/tvh/ekg-wai/issues/6
+    ekg-wai:base,
+    snap-server:base,
     floskell:base,
     floskell:ghc-prim,
     -- for shake-bench
