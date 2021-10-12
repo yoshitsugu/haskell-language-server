@@ -321,6 +321,7 @@ defaultMain Arguments{..} = do
 
                 server <- fmap join $ for argsMonitoringPort $ \p -> do
                     store <- Monitoring.newStore
+                    Monitoring.registerGcMetrics store
                     let startServer = Monitoring.forkServerWith store "localhost" (fromIntegral p)
                     -- this can fail if the port is busy, throwing an async exception back to us
                     -- to handle that, wrap the server thread in an async
