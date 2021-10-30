@@ -37,8 +37,7 @@ import           Development.IDE                       (Action, GhcVersion (..),
                                                         hDuplicateTo')
 import           Development.IDE.Core.Debouncer        (Debouncer,
                                                         newAsyncDebouncer)
-import           Development.IDE.Core.FileStore        (isWatchSupported,
-                                                        makeVFSHandle)
+import           Development.IDE.Core.FileStore        (isWatchSupported)
 import           Development.IDE.Core.IdeConfiguration (IdeConfiguration (..),
                                                         registerIdeConfiguration)
 import           Development.IDE.Core.OfInterest       (FileOfInterestStatus (OnDisk),
@@ -277,7 +276,7 @@ defaultMain Arguments{..} = do
             t <- offsetTime
             logInfo logger "Starting LSP server..."
             logInfo logger "If you are seeing this in a terminal, you probably should have run WITHOUT the --lsp option!"
-            runLanguageServer options inH outH argsGetHieDbLoc argsDefaultHlsConfig argsOnConfigChange (pluginHandlers plugins) $ \env vfs rootPath hiedb hieChan -> do
+            runLanguageServer options inH outH argsGetHieDbLoc argsDefaultHlsConfig argsOnConfigChange (pluginHandlers plugins) $ \env rootPath hiedb hieChan -> do
                 traverse_ IO.setCurrentDirectory rootPath
                 t <- t
                 logInfo logger $ T.pack $ "Started LSP server in " ++ showDuration t
@@ -317,7 +316,6 @@ defaultMain Arguments{..} = do
                     logger
                     debouncer
                     options
-                    vfs
                     hiedb
                     hieChan
         Check argFiles -> do
@@ -344,7 +342,6 @@ defaultMain Arguments{..} = do
             putStrLn $ "Found " ++ show n ++ " cradle" ++ ['s' | n /= 1]
             when (n > 0) $ putStrLn $ "  (" ++ intercalate ", " (catMaybes ucradles) ++ ")"
             putStrLn "\nStep 3/4: Initializing the IDE"
-            vfs <- makeVFSHandle
             sessionLoader <- loadSessionWithOptions argsSessionLoadingOptions dir
             let def_options = argsIdeOptions argsDefaultHlsConfig sessionLoader
                 options = def_options
@@ -352,7 +349,7 @@ defaultMain Arguments{..} = do
                         , optCheckProject = pure False
                         , optModifyDynFlags = optModifyDynFlags def_options <> pluginModifyDynflags plugins
                         }
-            ide <- initialise argsDefaultHlsConfig rules Nothing logger debouncer options vfs hiedb hieChan
+            ide <- initialise argsDefaultHlsConfig rules Nothing logger debouncer options hiedb hieChan
             shakeSessionInit ide
             registerIdeConfiguration (shakeExtras ide) $ IdeConfiguration mempty (hashed Nothing)
 
@@ -395,7 +392,6 @@ defaultMain Arguments{..} = do
         Custom projectRoot (IdeCommand c) -> do
           dbLoc <- getHieDbLoc projectRoot
           runWithDb logger dbLoc $ \hiedb hieChan -> do
-            vfs <- makeVFSHandle
             sessionLoader <- loadSessionWithOptions argsSessionLoadingOptions "."
             let def_options = argsIdeOptions argsDefaultHlsConfig sessionLoader
                 options = def_options
@@ -403,7 +399,7 @@ defaultMain Arguments{..} = do
                     , optCheckProject = pure False
                     , optModifyDynFlags = optModifyDynFlags def_options <> pluginModifyDynflags plugins
                     }
-            ide <- initialise argsDefaultHlsConfig rules Nothing logger debouncer options vfs hiedb hieChan
+            ide <- initialise argsDefaultHlsConfig rules Nothing logger debouncer options hiedb hieChan
             shakeSessionInit ide
             registerIdeConfiguration (shakeExtras ide) $ IdeConfiguration mempty (hashed Nothing)
             c ide

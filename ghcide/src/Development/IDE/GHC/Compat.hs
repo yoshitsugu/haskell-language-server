@@ -15,6 +15,7 @@ module Development.IDE.GHC.Compat(
     setUpTypedHoles,
     upNameCache,
     disableWarningsAsErrors,
+    isObjectLinkable,
 
 #if !MIN_VERSION_ghc(9,0,1)
     RefMap,

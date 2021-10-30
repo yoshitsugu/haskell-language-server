@@ -57,6 +57,7 @@ module Development.IDE.Core.Shake(
     setPriority,
     ideLogger,
     actionLogger,
+    getVirtualFile,
     FileVersion(..),
     Priority(..),
     updatePositionMapping,
@@ -72,7 +73,6 @@ module Development.IDE.Core.Shake(
     IndexQueue,
     HieDb,
     HieDbWriter(..),
-    VFSHandle(..),
     addPersistentRule,
     garbageCollectDirtyKeys,
     garbageCollectDirtyKeysOlderThan,
@@ -165,6 +165,11 @@ import           HieDb.Types
 import           Ide.Plugin.Config
 import qualified Ide.PluginUtils                        as HLS
 import           Ide.Types                              (PluginId)
+import Data.Functor ((<&>))
+import Development.IDE.Core.FileUtils (getModTime)
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+import Control.Applicative ( (<|>) )
 
 -- | We need to serialize writes to the database, so we send any function that
 -- needs to write to the database over the channel, where it will be picked up by
@@ -194,7 +199,7 @@ data ShakeExtras = ShakeExtras
     ,publishedDiagnostics :: Var (HMap.HashMap NormalizedUri [Diagnostic])
     -- ^ This represents the set of diagnostics that we have published.
     -- Due to debouncing not every change might get published.
-    ,positionMapping :: Var (HMap.HashMap NormalizedUri (Map TextDocumentVersion (PositionDelta, PositionMapping)))
+    ,positionMapping :: Var (HMap.HashMap NormalizedUri (IntMap (PositionDelta, PositionMapping)))
     -- ^ Map from a text document version to a PositionMapping that describes how to map
     -- positions in a version of that document to positions in the latest version
     -- First mapping is delta from previous version and second one is an
@@ -219,7 +224,7 @@ data ShakeExtras = ShakeExtras
     , persistentKeys :: Var (HMap.HashMap Key GetStalePersistent)
       -- ^ Registery for functions that compute/get "stale" results for the rule
       -- (possibly from disk)
-    , vfs :: VFSHandle
+    , vfs :: IORef VFS -- ^ A snapshot of the current state of the virtual file system. Updated on restart
     , defaultConfig :: Config
       -- ^ Default HLS config, only relevant if the client does not provide any Config
     , dirtyKeys :: IORef (HashSet Key)
@@ -260,18 +265,17 @@ addPersistentRule k getVal = do
 
 class Typeable a => IsIdeGlobal a where
 
+-- | Read a virtual file from the current snapshot
+getVirtualFile :: NormalizedFilePath -> Action (Maybe VirtualFile)
+getVirtualFile nf = do
+  vfs <- fmap vfsMap . liftIO . readIORef . vfs =<< getShakeExtras
+  pure (Map.lookup (filePathToUri' nf) vfs)
 
--- | haskell-lsp manages the VFS internally and automatically so we cannot use
--- the builtin VFS without spawning up an LSP server. To be able to test things
--- like `setBufferModified` we abstract over the VFS implementation.
-data VFSHandle = VFSHandle
-    { getVirtualFile         :: NormalizedUri -> IO (Maybe VirtualFile)
-        -- ^ get the contents of a virtual file
-    , setVirtualFileContents :: Maybe (NormalizedUri -> Maybe T.Text -> IO ())
-        -- ^ set a specific file to a value. If Nothing then we are ignoring these
-        --   signals anyway so can just say something was modified
-    }
-instance IsIdeGlobal VFSHandle
+-- Take a snapshot of the current LSP VFS
+vfsSnapshot :: Maybe (LSP.LanguageContextEnv a) -> IO VFS
+vfsSnapshot Nothing = pure $ VFS mempty ""
+vfsSnapshot (Just lspEnv) = LSP.runLspT lspEnv LSP.getVirtualFiles
+
 
 addIdeGlobal :: IsIdeGlobal a => a -> Rules ()
 addIdeGlobal x = do
@@ -283,7 +287,6 @@ addIdeGlobalExtras ShakeExtras{globals} x@(typeOf -> ty) =
     void $ liftIO $ modifyVarIO' globals $ \mp -> case HMap.lookup ty mp of
         Just _ -> errorIO $ "Internal error, addIdeGlobalExtras, got the same type twice for " ++ show ty
         Nothing -> return $! HMap.insert ty (toDyn x) mp
-
 
 getIdeGlobalExtras :: forall a . IsIdeGlobal a => ShakeExtras -> IO a
 getIdeGlobalExtras ShakeExtras{globals} = do
@@ -337,8 +340,12 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
                 void $ modifyVar' state $ HMap.alter (alterValue $ Failed True) (toKey k file)
                 return Nothing
             Just (v,del,ver) -> do
-                void $ modifyVar' state $ HMap.alter (alterValue $ Stale (Just del) ver (toDyn v)) (toKey k file)
-                return $ Just (v,addDelta del $ mappingForVersion allMappings file ver)
+                actual_version <- case ver of
+                  Just ver -> pure (Just $ VFSVersion ver)
+                  Nothing -> (Just . ModificationTime <$> getModTime (fromNormalizedFilePath file))
+                              `catch` (\(_ :: IOException) -> pure Nothing)
+                void $ modifyVar' state $ HMap.alter (alterValue $ Stale (Just del) actual_version (toDyn v)) (toKey k file)
+                return $ Just (v,addDelta del $ mappingForVersion allMappings file actual_version)
 
         -- We got a new stale value from the persistent rule, insert it in the map without affecting diagnostics
         alterValue new Nothing = Just (ValueWithDiagnostics new mempty) -- If it wasn't in the map, give it empty diagnostics
@@ -364,14 +371,15 @@ lastValue key file = do
     liftIO $ lastValueIO s key file
 
 mappingForVersion
-    :: HMap.HashMap NormalizedUri (Map TextDocumentVersion (a, PositionMapping))
+    :: HMap.HashMap NormalizedUri (IntMap (a, PositionMapping))
     -> NormalizedFilePath
-    -> TextDocumentVersion
+    -> Maybe FileVersion
     -> PositionMapping
-mappingForVersion allMappings file ver =
+mappingForVersion allMappings file (Just (VFSVersion ver)) =
     maybe zeroMapping snd $
-    Map.lookup ver =<<
+    IM.lookup ver =<<
     HMap.lookup (filePathToUri' file) allMappings
+mappingForVersion _ _ _ = zeroMapping
 
 type IdeRule k v =
   ( Shake.RuleResult k ~ v
@@ -489,12 +497,11 @@ shakeOpen :: Maybe (LSP.LanguageContextEnv Config)
           -> IdeTesting
           -> HieDb
           -> IndexQueue
-          -> VFSHandle
           -> ShakeOptions
           -> Rules ()
           -> IO IdeState
 shakeOpen lspEnv defaultConfig logger debouncer
-  shakeProfileDir (IdeReportProgress reportProgress) ideTesting@(IdeTesting testing) hiedb indexQueue vfs opts rules = mdo
+  shakeProfileDir (IdeReportProgress reportProgress) ideTesting@(IdeTesting testing) hiedb indexQueue opts rules = mdo
 
     us <- mkSplitUniqSupply 'r'
     ideNc <- newIORef (initNameCache us knownKeyNames)
@@ -530,6 +537,9 @@ shakeOpen lspEnv defaultConfig logger debouncer
         let clientCapabilities = maybe def LSP.resClientCapabilities lspEnv
 
         dirtyKeys <- newIORef mempty
+        -- Take one VFS snapshot at the start
+        vfsData <- vfsSnapshot lspEnv
+        vfs <- newIORef vfsData
         pure ShakeExtras{..}
     (shakeDbM, shakeClose) <-
         shakeOpenDatabase
@@ -672,6 +682,11 @@ newSession
     -> String
     -> IO ShakeSession
 newSession extras@ShakeExtras{..} shakeDb acts reason = do
+
+    -- Take a new VFS snapshot
+    vfsData <- vfsSnapshot lspEnv
+    writeIORef vfs vfsData
+
     IdeOptions{optRunSubset} <- getIdeOptionsIO extras
     reenqueued <- atomically $ peekInProgress actionQueue
     allPendingKeys <-
@@ -943,6 +958,7 @@ usesWithStale key files = do
     -- whether the rule succeeded or not.
     mapM (lastValue key) files
 
+
 data RuleBody k v
   = Rule (k -> NormalizedFilePath -> Action (Maybe BS.ByteString, IdeResult v))
   | RuleNoDiagnostics (k -> NormalizedFilePath -> Action (Maybe BS.ByteString, Maybe v))
@@ -950,6 +966,7 @@ data RuleBody k v
     { newnessCheck :: BS.ByteString -> BS.ByteString -> Bool
     , build :: k -> NormalizedFilePath -> Action (Maybe BS.ByteString, Maybe v)
     }
+  | RuleWithOldValue (k -> NormalizedFilePath -> Value v -> Action (Maybe BS.ByteString, IdeResult v))
 
 -- | Define a new Rule with early cutoff
 defineEarlyCutoff
@@ -957,14 +974,16 @@ defineEarlyCutoff
     => RuleBody k v
     -> Rules ()
 defineEarlyCutoff (Rule op) = addRule $ \(Q (key, file)) (old :: Maybe BS.ByteString) mode -> otTracedAction key file mode traceA $ do
-    defineEarlyCutoff' True (==) key file old mode $ op key file
+    defineEarlyCutoff' True (==) key file old mode $ const $ op key file
 defineEarlyCutoff (RuleNoDiagnostics op) = addRule $ \(Q (key, file)) (old :: Maybe BS.ByteString) mode -> otTracedAction key file mode traceA $ do
-    defineEarlyCutoff' False (==) key file old mode $ second (mempty,) <$> op key file
+    defineEarlyCutoff' False (==) key file old mode $ const $ second (mempty,) <$> op key file
 defineEarlyCutoff RuleWithCustomNewnessCheck{..} =
     addRule $ \(Q (key, file)) (old :: Maybe BS.ByteString) mode ->
         otTracedAction key file mode traceA $
             defineEarlyCutoff' False newnessCheck key file old mode $
-                second (mempty,) <$> build key file
+                const $ second (mempty,) <$> build key file
+defineEarlyCutoff (RuleWithOldValue op) = addRule $ \(Q (key, file)) (old :: Maybe BS.ByteString) mode -> otTracedAction key file mode traceA $ do
+    defineEarlyCutoff' True (==) key file old mode $ op key file
 
 defineNoFile :: IdeRule k v => (k -> Action v) -> Rules ()
 defineNoFile f = defineNoDiagnostics $ \k file -> do
@@ -977,7 +996,7 @@ defineEarlyCutOffNoFile f = defineEarlyCutoff $ RuleNoDiagnostics $ \k file -> d
         fail $ "Rule " ++ show k ++ " should always be called with the empty string for a file"
 
 defineEarlyCutoff'
-    :: IdeRule k v
+    :: forall k v. IdeRule k v
     => Bool  -- ^ update diagnostics
     -- | compare current and previous for freshness
     -> (BS.ByteString -> BS.ByteString -> Bool)
@@ -985,7 +1004,7 @@ defineEarlyCutoff'
     -> NormalizedFilePath
     -> Maybe BS.ByteString
     -> RunMode
-    -> Action (Maybe BS.ByteString, IdeResult v)
+    -> (Value v -> Action (Maybe BS.ByteString, IdeResult v))
     -> Action (RunResult (A (RuleResult k)))
 defineEarlyCutoff' doDiagnostics cmp key file old mode action = do
     extras@ShakeExtras{state, progress, logger, dirtyKeys} <- getShakeExtras
@@ -1009,24 +1028,29 @@ defineEarlyCutoff' doDiagnostics cmp key file old mode action = do
         res <- case val of
             Just res -> return res
             Nothing -> do
+                staleV <- liftIO $ getValues state key file <&> \case
+                  Nothing -> Failed False
+                  Just (Succeeded ver v, _) -> Stale Nothing ver v
+                  Just (Stale d ver v, _)   -> Stale d ver v
+                  Just (Failed b, _)        -> Failed b
+
                 (bs, (diags, res)) <- actionCatch
-                    (do v <- action; liftIO $ evaluate $ force v) $
+                    (do v <- action staleV; liftIO $ evaluate $ force v) $
                     \(e :: SomeException) -> do
                         pure (Nothing, ([ideErrorText file $ T.pack $ show e | not $ isBadDependency e],Nothing))
-                modTime <- liftIO $ (currentValue . fst =<<) <$> getValues state GetModificationTime file
+
+                modTime <- case eqT @k @GetModificationTime of
+                  Just Refl -> pure res
+                  Nothing
+                    | file == emptyFilePath -> pure Nothing
+                    | otherwise -> liftIO $ do
+                        m1 <- (currentValue . fst =<<) <$> getValues state (GetModificationTime_ False) file
+                        m2 <- (currentValue . fst =<<) <$> getValues state (GetModificationTime_ True ) file
+                        pure (m1 <|> m2)
+
                 (bs, res) <- case res of
-                    Nothing -> do
-                        staleV <- liftIO $ getValues state key file
-                        pure $ case staleV of
-                            Nothing -> (toShakeValue ShakeResult bs, Failed False)
-                            Just v -> case v of
-                                (Succeeded ver v, _) ->
-                                    (toShakeValue ShakeStale bs, Stale Nothing ver v)
-                                (Stale d ver v, _) ->
-                                    (toShakeValue ShakeStale bs, Stale d ver v)
-                                (Failed b, _) ->
-                                    (toShakeValue ShakeResult bs, Failed b)
-                    Just v -> pure (maybe ShakeNoCutoff ShakeResult bs, Succeeded (vfsVersion =<< modTime) v)
+                    Nothing -> pure (toShakeValue ShakeStale bs, staleV)
+                    Just v -> pure (maybe ShakeNoCutoff ShakeResult bs, Succeeded modTime v)
                 liftIO $ setValues state key file res (Vector.fromList diags)
                 if doDiagnostics
                     then updateFileDiagnostics file (Key key) extras $ map (\(_,y,z) -> (y,z)) diags
@@ -1134,8 +1158,8 @@ updateFileDiagnostics fp k ShakeExtras{logger, diagnostics, hiddenDiagnostics, p
         uri = filePathToUri' fp
         ver = vfsVersion =<< modTime
         update new store =
-            let store' = setStageDiagnostics uri ver (T.pack $ show k) new store
-                new' = getUriDiagnostics uri store'
+            let !store' = setStageDiagnostics uri ver (T.pack $ show k) new store
+                !new' = getUriDiagnostics uri store'
             in (store', new')
     mask_ $ do
         -- Mask async exceptions to ensure that updated diagnostics are always
@@ -1187,7 +1211,7 @@ setStageDiagnostics
     -> DiagnosticStore
 setStageDiagnostics uri ver stage diags ds = updateDiagnostics ds uri ver updatedDiags
   where
-    updatedDiags = Map.singleton (Just stage) (SL.toSortedList diags)
+    !updatedDiags = Map.singleton (Just stage) $! SL.toSortedList diags
 
 getAllDiagnostics ::
     DiagnosticStore ->
@@ -1207,14 +1231,17 @@ updatePositionMapping :: IdeState -> VersionedTextDocumentIdentifier -> List Tex
 updatePositionMapping IdeState{shakeExtras = ShakeExtras{positionMapping}} VersionedTextDocumentIdentifier{..} (List changes) = do
     modifyVar_ positionMapping $ \allMappings -> do
         let uri = toNormalizedUri _uri
-        let mappingForUri = HMap.lookupDefault Map.empty uri allMappings
+        let mappingForUri = HMap.lookupDefault IM.empty uri allMappings
         let (_, updatedMapping) =
                 -- Very important to use mapAccum here so that the tails of
                 -- each mapping can be shared, otherwise quadratic space is
                 -- used which is evident in long running sessions.
-                Map.mapAccumRWithKey (\acc _k (delta, _) -> let new = addDelta delta acc in (new, (delta, acc)))
+                IM.mapAccumRWithKey (\acc _k (delta, _) -> let new = addDelta delta acc in (new, (delta, acc)))
                   zeroMapping
-                  (Map.insert _version (shared_change, zeroMapping) mappingForUri)
+                  (IM.insert actual_version (shared_change, zeroMapping) mappingForUri)
         pure $ HMap.insert uri updatedMapping allMappings
   where
     shared_change = mkDelta changes
+    actual_version = case _version of
+      Nothing -> error "Nothing version from server"
+      Just v -> v

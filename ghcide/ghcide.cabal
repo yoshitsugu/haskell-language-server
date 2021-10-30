@@ -146,6 +146,7 @@ library
         Development.IDE.Core.Actions
         Development.IDE.Core.Debouncer
         Development.IDE.Core.FileStore
+        Development.IDE.Core.FileUtils
         Development.IDE.Core.IdeConfiguration
         Development.IDE.Core.OfInterest
         Development.IDE.Core.PositionMapping
@@ -219,6 +220,7 @@ library
                 -Wincomplete-uni-patterns
                 -Wno-unticked-promoted-constructors
                 -fno-ignore-asserts
+                -j12
 
     if flag(ghc-patched-unboxed-bytecode)
       cpp-options: -DGHC_PATCHED_UNBOXED_BYTECODE
@@ -295,6 +297,7 @@ executable ghcide
                 -Wno-name-shadowing
                 -- allow user RTS overrides
                 -rtsopts
+                -eventlog
                 -- disable idle GC
                 -- increase nursery size
                 "-with-rtsopts=-I0 -A128M"

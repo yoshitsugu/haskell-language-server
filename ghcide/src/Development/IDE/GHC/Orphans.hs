@@ -37,6 +37,7 @@ import           Data.Aeson
 import           Data.Hashable
 import           Data.String                (IsString (fromString))
 import           Data.Text                  (Text)
+import ByteCodeTypes
 
 -- Orphan instances for types from the GHC API.
 instance Show CoreModule where show = prettyPrint
@@ -47,7 +48,12 @@ instance Show ModDetails where show = const "<moddetails>"
 instance NFData ModDetails where rnf = rwhnf
 instance NFData SafeHaskellMode where rnf = rwhnf
 instance Show Linkable where show = prettyPrint
-instance NFData Linkable where rnf = rwhnf
+instance NFData Linkable where rnf (LM a b c) = rnf a `seq` rnf b `seq` rnf c
+instance NFData Unlinked where
+  rnf (DotO f) = rnf f
+  rnf (DotA f) = rnf f
+  rnf (DotDLL f) = rnf f
+  rnf (BCOs a b) = seqCompiledByteCode a `seq` liftRnf rwhnf b
 instance Show PackageFlag where show = prettyPrint
 instance Show InteractiveImport where show = prettyPrint
 instance Show PackageName  where show = prettyPrint
