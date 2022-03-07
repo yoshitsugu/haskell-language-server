@@ -41,7 +41,7 @@ jobs:
       run: |
         apk add --no-cache curl gcc g++ gmp-dev ncurses-dev libffi-dev make xz gzip tar perl git bash sudo binutils-gold
         apk add --no-cache zlib zlib-dev zlib-static gmp gmp-dev ncurses-static
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
     - name: Disable tests and bechmarks
       run: |
@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-18.04
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set hls release version
         run: |
