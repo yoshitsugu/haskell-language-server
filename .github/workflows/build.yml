@@ -98,7 +98,7 @@ jobs:
         asset_content_type: ${{ steps.compress_server_binary.outputs.content_type }}
 
     - name: Upload server to workflow artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: haskell-language-server-${{ runner.os }}-${{ matrix.ghc }}${{ env.EXE_EXT }}.${{ steps.compress_server_binary.outputs.extension }}
         path: ${{ steps.compress_server_binary.outputs.path }}
@@ -138,7 +138,7 @@ jobs:
         asset_content_type: ${{ steps.compress_wrapper_binary.outputs.content_type}}
 
     - name: Upload wrapper to workflow artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       if: matrix.ghc == '8.10.7'
       with:
         name: haskell-language-server-wrapper-${{ runner.os }}${{ env.EXE_EXT }}.${{ steps.compress_wrapper_binary.outputs.extension }}
@@ -181,7 +181,7 @@ jobs:
           asset_content_type: application/gzip
 
       - name: Upload source tarball to workflow artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: haskell-language-server-${{ env.HLS_VER }}-src.tar.gz
           path: src-dist/haskell-language-server.tar.gz
@@ -237,7 +237,7 @@ jobs:
           echo "HLS_VER=$HLS_VER" >> $GITHUB_ENV
 
       - name: Upload binaries tarball to workflow artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: haskell-language-server-${{ matrix.target-os }}-${{ env.HLS_VER }}.tar.gz
           path: bin/haskell-language-server.tar.gz
@@ -266,7 +266,7 @@ jobs:
           asset_content_type: plain/text
 
       - name: Upload sha256sums to workflow artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: SHA256SUMS
           path: SHA256SUMS
